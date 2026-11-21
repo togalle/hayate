@@ -26,6 +26,21 @@ A user will eventually be able to tune preferences (fastest, most comfortable, q
 
 Key bicycle tags: `highway`, `bicycle`, `cycleway`, `surface`, `maxspeed`, `oneway:bicycle`
 
+## Graph topology (Ghent, from `cmd/explore`)
+
+Structural facts that drive graph construction (tag EDA above does not cover these):
+
+- 4,003,297 nodes in the file, but only 301,995 (**7.5%**) are referenced by bicycle-accessible ways
+- 68,155 nodes are intersections (referenced by >=2 kept ways), 22.6% of referenced nodes
+- 6.3 nodes per bike way on average
+- Naive node-per-node graph: ~324,900 directed edges. Intersection-only compressed graph: ~68,155 edges (4.7x fewer)
+- Of oneway bike ways, 5,968 are plain oneway and 1,848 (**24%**) let cyclists ride contraflow (`oneway:bicycle=no` or `cycleway=opposite*`), so the exemption check is load-bearing
+
+Consequences for the build:
+
+- **Parse in two passes, do not store all node coords.** Referenced nodes are 7.5% of the file. Pass 1 filters ways and collects referenced node IDs, pass 2 fills coordinates for that set only. ~13x less node memory than store-all, and far more on Belgium.
+- **Start with the naive node-per-node graph.** 325k edges is cheap at city scale. Intersection-only compression is a later optimization, now quantified at 4.7x.
+
 ## Commands
 
 ```bash
@@ -33,22 +48,31 @@ Key bicycle tags: `highway`, `bicycle`, `cycleway`, `surface`, `maxspeed`, `onew
 uv venv && uv pip install pyrosm
 .venv/bin/python bike_eda.py osm-data/ghent.osm.pbf
 
-# Explore raw tag frequencies (Go)
+# Explore raw tag frequencies + graph topology (Go)
 go run ./cmd/explore osm-data/ghent.osm.pbf
 ```
 
 ## Roadmap
 
 ### Phase 1 - Graph construction
-Parse the PBF into an in-memory directed graph.
+Parse the PBF into an in-memory directed graph. Target: `graph/build.go`, reusing the
+accessibility and oneway-exemption logic already ported to Go in `cmd/explore/main.go`.
 
+- **Two-pass parse** (see Graph topology above): pass 1 filters bicycle-accessible ways and
+  collects referenced node IDs, pass 2 fills coordinates for that set only. Do not store all
+  node coords.
 - Filter ways to bicycle-accessible using OSM tag logic (`highway`, `bicycle`, `access`)
-- Split each way into directed edges between consecutive node pairs
-- Handle oneway: add reverse edge only if `oneway:bicycle=no` or `cycleway=opposite*`
+- Naive graph: split each way into directed edges between consecutive node pairs (every way-node
+  is a vertex). Intersection-only compression is a later optimization, ~4.7x fewer edges.
+- Handle oneway: add reverse edge unless `oneway in {yes,1,true}` and not cyclist-exempt
+  (`oneway:bicycle=no` or `cycleway=opposite*`); for `oneway=-1` add only the reverse. 24% of
+  oneway bike ways are exempt, so this check matters.
 - Edge attributes: distance (haversine), highway type, surface, cycleway tag, maxspeed
 - Infer missing surface and speed from highway type
+- Skip for now: largest-connected-component pruning (add a BFS when a route fails across islands);
+  `bicycle=use_sidepath` redirect (belongs in the Phase 3 cost function)
 
-**Output:** `graph.Build(pbf) -> Graph`. Ghent loads in under 1 second.
+**Output:** `graph.Build(pbf) -> Graph`. Ghent: ~302k nodes, ~325k edges, loads in under 1 second.
 
 ### Phase 2 - Basic routing (A\*)
 Given two coordinates, return a route.
